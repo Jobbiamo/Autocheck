@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Spia motore stilizzata -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#E8772E"
+        android:pathData="M38,42 h10 v-4 h12 v4 h6 l4,4 h4 v-4 h4 v18 h-4 v-4 h-4 l-4,6 h-22 l-4,-4 h-6 v4 h-4 v-16 h4 v4 h4 z" />
+</vector>
