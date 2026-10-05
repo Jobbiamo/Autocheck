@@ -16,14 +16,50 @@ object DatabaseGuasti {
 
     private const val DIAGNOSI = "Una diagnosi professionale in officina costa di solito 30–60 €."
 
-    fun trova(codice: String): Scheda {
+    fun trova(codice: String): Scheda = cerca(codice) ?: generica(codice.uppercase())
+
+    private fun cerca(codice: String): Scheda? {
         val c = codice.uppercase()
         esatti[c]?.let { return it.copy(codice = c) }
         for ((da, a, crea) in intervalli) {
             if (nelRange(c, da, a)) return crea(c)
         }
-        return generica(c)
+        return null
     }
+
+    /** Scheda per un codice letto da una centralina diversa da quella motore. */
+    fun trovaPerCentralina(codice: String, tipo: TipoCentralina, dettaglio: String?): Scheda {
+        val c = codice.uppercase()
+        val base = cerca(c) ?: when (tipo) {
+            TipoCentralina.ABS_ESP -> genericaAbsEsp(c)
+            TipoCentralina.AIRBAG -> genericaAirbag(c)
+            else -> generica(c)
+        }
+        val origine = "Letto dalla centralina: ${tipo.nome}" + (dettaglio?.let { " ($it)" } ?: "")
+        return base.copy(nota = listOfNotNull(origine, base.nota).joinToString("\n"))
+    }
+
+    private fun genericaAbsEsp(c: String) = Scheda(c, "Codice $c della centralina ABS/ESP",
+        "La centralina dei freni e della stabilità ha registrato un guasto. Questo codice è specifico del costruttore e non è nel database dell'app: ecco le cause più frequenti per questo sistema.",
+        ARANCIONE,
+        "Puoi guidare con prudenza: ABS e/o ESP possono essere disattivati. Tieni più distanza. Se è accesa la spia ROSSA dei freni, fermati.",
+        listOf("Sensore di velocità di una ruota o il suo cavo (la causa più frequente)", "Anello dentato del sensore sporco o crepato",
+            "Sensore angolo di sterzo da ricalibrare", "Interruttore luci stop", "Tensione batteria bassa", "Centralina o pompa ABS/ESP (più raro)"),
+        listOf("Cerca online \"$c Opel Agila\" o \"$c Suzuki Splash\" (sono la stessa auto) per la descrizione esatta",
+            "Controlla che le luci dei freni funzionino"),
+        "Sì. Porta il codice al meccanico: gli fa risparmiare tempo di diagnosi.",
+        "Sensore ruota: 30–90 € + 40–80 €. Calibrazione sterzo: 30–60 €. Centralina ABS/ESP: 250–500 € riparazione, 800–1.500 € nuova.",
+        "In frenata d'emergenza o su bagnato l'auto è meno sicura. Con la spia accesa non si passa la revisione.")
+
+    private fun genericaAirbag(c: String) = Scheda(c, "Codice $c della centralina airbag",
+        "La centralina degli airbag ha registrato un guasto: airbag e pretensionatori potrebbero non aprirsi in un incidente.",
+        ARANCIONE,
+        "L'auto si guida normalmente, ma fai controllare il prima possibile.",
+        listOf("Connettore sotto un sedile anteriore", "Contatto spiralato del volante", "Pretensionatore di una cintura", "Centralina airbag"),
+        listOf("A quadro SPENTO controlla che i connettori gialli sotto i sedili siano ben inseriti"),
+        "Sì. Non smontare parti dell'airbag da solo.",
+        "Connettore: 0–50 €. Contatto spiralato: 90–220 € in totale. Pretensionatore: 140–260 € in totale.",
+        "In un incidente gli airbag possono non aprirsi. Con la spia accesa non si passa la revisione.")
 
     fun numeroCodiciConosciuti(): Int = esatti.size
 
@@ -531,6 +567,52 @@ object DatabaseGuasti {
             "Sì, entro pochi giorni.",
             "Ricerca guasto: 50–150 €. Riparazione centralina ABS: 200–450 €.",
             "Frenate di emergenza meno sicure.")
+    }
+
+    init {
+        // ───────────── TELAIO (ABS / ESP) ─────────────
+        val ruote = listOf("C0035" to "anteriore sinistra", "C0040" to "anteriore destra", "C0045" to "posteriore sinistra", "C0050" to "posteriore destra")
+        for ((cod, ruota) in ruote) {
+            s(cod, "Sensore velocità ruota $ruota",
+                "Il sensore che misura quanto gira la ruota $ruota non manda un segnale corretto. Senza questo dato ABS ed ESP si disattivano.",
+                ARANCIONE, "Puoi guidare con prudenza: in frenata forte la ruota può bloccarsi e l'ESP non interviene. Tieni più distanza.",
+                listOf("Sensore sporco di fango o polvere dei freni", "Cavo del sensore rovinato o connettore ossidato (vicino alla ruota)", "Anello dentato sul mozzo crepato o arrugginito", "Sensore guasto"),
+                listOf("Guarda se il cavo che arriva alla ruota $ruota è rotto o staccato"),
+                "Sì, entro pochi giorni. È uno dei lavori più comuni ed economici su ABS/ESP.",
+                "Pulizia: 30–60 €. Sensore: 30–90 € + 40–80 € manodopera. Anello/mozzo: 60–200 € + 60–120 €.",
+                "ABS ed ESP restano spenti: frenate d'emergenza meno sicure e bocciatura alla revisione.")
+        }
+        r("C0455", "C0460") { c -> Scheda(c, "Sensore angolo di sterzo",
+            "Il sensore che dice all'ESP quanto stai girando il volante dà un valore sbagliato o non è calibrato.",
+            ARANCIONE, "Puoi guidare con prudenza: l'ESP è disattivato.",
+            listOf("Sensore da ricalibrare dopo lo stacco della batteria, una convergenza o lavori allo sterzo", "Sensore guasto", "Connettore sotto il volante"),
+            listOf("A motore acceso gira il volante tutto a sinistra e tutto a destra, poi guida dritto per qualche centinaio di metri"),
+            "Sì, se la spia non si spegne: la calibrazione si fa con lo strumento di diagnosi.",
+            "Calibrazione: 30–60 €. Sensore nuovo: 80–200 € + 50–80 €.",
+            "Resti senza ESP.") }
+
+        s("U0126", "Persa la comunicazione con il sensore angolo di sterzo",
+            "La centralina non riceve più i dati dal sensore dell'angolo di sterzo.",
+            ARANCIONE, "Puoi guidare con prudenza: l'ESP è disattivato.",
+            listOf("Connettore o cavo del sensore", "Tensione batteria bassa", "Sensore guasto"),
+            listOf("Guarda la tensione della batteria nella scheda \"Live\""),
+            "Sì.", "Ricerca guasto: 50–100 €. Sensore: 80–200 € + 50–80 €.", "Resti senza ESP.")
+        s("U0140", "Persa la comunicazione con la centralina carrozzeria",
+            "Le centraline non riescono a parlare con quella della carrozzeria (luci, chiusure, tergicristalli).",
+            ARANCIONE, "Puoi guidare con prudenza: alcune funzioni elettriche possono non andare.",
+            listOf("Batteria debole", "Fusibile", "Connettore ossidato", "Centralina carrozzeria"),
+            listOf("Controlla i morsetti della batteria"), "Sì.", "Ricerca guasto: 50–150 €.", "Malfunzionamenti di luci e comandi.")
+        s("U0151", "Persa la comunicazione con la centralina airbag",
+            "Le altre centraline non ricevono dati da quella degli airbag: gli airbag potrebbero non funzionare.",
+            ARANCIONE, "Puoi guidare, ma fai controllare presto: gli airbag potrebbero non aprirsi.",
+            listOf("Connettore della centralina airbag", "Fusibile", "Centralina airbag"),
+            listOf("Niente: non toccare l'impianto airbag"), "Sì.", "Ricerca guasto: 50–150 €. Centralina airbag: 200–500 €.",
+            "In un incidente gli airbag possono non aprirsi.")
+        s("U0155", "Persa la comunicazione con il quadro strumenti",
+            "Le centraline non ricevono dati dal quadro strumenti.",
+            ARANCIONE, "Puoi guidare con prudenza: lancette e spie potrebbero non essere affidabili.",
+            listOf("Batteria debole", "Fusibile del quadro", "Connettore dietro il quadro"),
+            listOf("Controlla i morsetti della batteria"), "Sì.", "Ricerca guasto: 50–150 €.", "Spie e indicatori inaffidabili.")
     }
 
     /** Spiegazione per codici non presenti nel database, in base alla famiglia. */

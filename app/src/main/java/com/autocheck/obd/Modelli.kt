@@ -55,5 +55,9 @@ data class Rapporto(
     val codici: List<String>,
     val spiaAccesa: Boolean,
     val kmDaCancellazione: Int?,
-    val protocollo: String
+    val protocollo: String,
+    val spie: List<String> = emptyList(),
+    val centraline: List<Centralina>? = null,
+    val notaScansione: String? = null,
+    val logTecnico: String? = null
 )

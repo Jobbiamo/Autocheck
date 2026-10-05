@@ -23,6 +23,9 @@ class ObdConnection {
         private set
     var nomeDispositivo: String = ""
         private set
+    /** Numero di protocollo ELM327 (3 = ISO 9141, 4/5 = KWP, 6–9 = CAN). */
+    var numeroProtocollo: Int = 0
+        private set
 
     val connesso: Boolean
         get() = socket?.isConnected == true
@@ -80,7 +83,9 @@ class ObdConnection {
                     "Gira la chiave sul secondo scatto (quadro acceso) e riprova."
             )
         }
-        protocollo = ObdParser.nomeProtocollo(comando("ATDPN"))
+        val dpn = comando("ATDPN")
+        protocollo = ObdParser.nomeProtocollo(dpn)
+        numeroProtocollo = dpn.trim().uppercase().removePrefix("A").take(1).toIntOrNull(16) ?: 0
     }
 
     /** Invia un comando e restituisce la risposta senza il prompt '>'. */
@@ -141,6 +146,10 @@ class ObdConnection {
         return Letture(memorizzati, pendenti, permanenti, stato, valori, protocollo)
     }
 
+    /** Prova a leggere le altre centraline (ABS/ESP, airbag...). Solo lettura. */
+    fun scansioneEstesa(progresso: (String) -> Unit): EsitoScansione =
+        ScansioneEstesa({ c, t -> comando(c, t) }, numeroProtocollo, protocollo, progresso).esegui()
+
     /** Cancella i codici errore e spegne la spia motore. */
     fun cancellaErrori(): Boolean {
         val r = comando("04", 8000)
@@ -155,6 +164,7 @@ class ObdConnection {
         output = null
         socket = null
         protocollo = ""
+        numeroProtocollo = 0
     }
 
     companion object {

@@ -43,6 +43,17 @@ class MainActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("autocheck", MODE_PRIVATE) }
     private val fmtData = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.ITALY)
 
+    // Schede
+    private val T_CONTROLLO = 0
+    private val T_SPIE = 1
+    private val T_LIVE = 2
+    private val T_STORICO = 3
+    private val T_ADATTATORE = 4
+
+    // Selezioni del controllo
+    private val spieAccese = LinkedHashSet<String>()
+    private var scansioneEstesa = true
+
     // Colori
     private val BLU = 0xFF1E3A5F.toInt()
     private val ARANCIO = 0xFFE8772E.toInt()
@@ -54,7 +65,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         storico = Storico(this)
         costruisciInterfaccia()
-        mostraTab(if (obd.connesso) 0 else 3)
+        mostraTab(if (obd.connesso) T_CONTROLLO else T_ADATTATORE)
     }
 
     override fun onDestroy() {
@@ -84,12 +95,13 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.WHITE)
         }
-        listOf("Controllo", "Motore live", "Storico", "Adattatore").forEachIndexed { i, nome ->
+        listOf("Controllo", "Spie", "Live", "Storico", "Adattatore").forEachIndexed { i, nome ->
             val t = TextView(this).apply {
                 text = nome
-                textSize = 13f
+                textSize = 12.5f
                 gravity = Gravity.CENTER
-                setPadding(dp(4), dp(14), dp(4), dp(14))
+                maxLines = 1
+                setPadding(dp(2), dp(14), dp(2), dp(14))
                 setOnClickListener { mostraTab(i) }
             }
             barra.addView(t, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -124,10 +136,11 @@ class MainActivity : Activity() {
         contenuto.removeAllViews()
         scroll.scrollTo(0, 0)
         when (i) {
-            0 -> tabControllo()
-            1 -> tabLive()
-            2 -> tabStorico()
-            3 -> tabAdattatore()
+            T_CONTROLLO -> tabControllo()
+            T_SPIE -> tabSpie()
+            T_LIVE -> tabLive()
+            T_STORICO -> tabStorico()
+            T_ADATTATORE -> tabAdattatore()
         }
     }
 
@@ -138,7 +151,7 @@ class MainActivity : Activity() {
             val c = card()
             c.addView(testo("Prima collega l'adattatore", 17f, true))
             c.addView(testo("Inserisci l'ELM327 nella presa OBD della macchina, accendi il quadro e collegalo dalla scheda \"Adattatore\".", 15f).margine(6))
-            c.addView(bottone("Vai al collegamento", BLU) { mostraTab(3) }.margine(12))
+            c.addView(bottone("Vai al collegamento", BLU) { mostraTab(T_ADATTATORE) }.margine(12))
             aggiungi(c)
             ultimoRapporto?.let { mostraRapporto(it) }
             return
@@ -154,6 +167,19 @@ class MainActivity : Activity() {
             prefs.getInt("ultimi_km", -1).takeIf { it > 0 }?.let { setText(it.toString()) }
         }
         c.addView(kmEdit)
+
+        c.addView(testo("Quali spie sono accese sul cruscotto adesso? (tocca per selezionare)", 14f).margine(14))
+        c.addView(selettoreSpie().margine(6))
+
+        val estesaTv = testo("", 14f)
+        fun aggiornaEstesa() {
+            estesaTv.text = (if (scansioneEstesa) "☑" else "☐") + "  Scansione estesa: prova a leggere anche ABS/ESP, airbag e altre centraline (sperimentale, +30–60 secondi)"
+        }
+        aggiornaEstesa()
+        estesaTv.setPadding(0, dp(8), 0, dp(8))
+        estesaTv.setOnClickListener { scansioneEstesa = !scansioneEstesa; aggiornaEstesa() }
+        c.addView(estesaTv.margine(10))
+
         c.addView(bottone("AVVIA CONTROLLO", ARANCIO) {
             val km = kmEdit.text.toString().trim().toIntOrNull()
             km?.let { prefs.edit().putInt("ultimi_km", it).apply() }
@@ -165,17 +191,27 @@ class MainActivity : Activity() {
     }
 
     private fun avviaControllo(km: Int?) {
-        val attesa = dialogoAttesa("Sto leggendo la centralina dell'auto…\nCi vogliono circa 20–40 secondi.")
+        val attesa = dialogoAttesa("Sto leggendo la centralina motore…\nCi vogliono circa 20–40 secondi.")
+        val spie = spieAccese.toSet()
+        val estesaRichiesta = scansioneEstesa
         Thread {
             try {
                 val letture = obd.leggiTutto()
+                val estesa = if (estesaRichiesta) {
+                    runOnUiThread { attesa.setMessage("Centralina motore letta.\nOra provo le altre centraline (ABS/ESP, airbag…)…") }
+                    try {
+                        obd.scansioneEstesa { msg -> runOnUiThread { attesa.setMessage("Scansione estesa\n$msg") } }
+                    } catch (e: Exception) {
+                        EsitoScansione(emptyList(), "ERRORE: ${e.message}", "Scansione estesa non riuscita: ${e.message}")
+                    }
+                } else null
                 val precedente = storico.lista().firstOrNull()
-                val r = Analizzatore.analizza(letture, km, precedente)
+                val r = Analizzatore.analizza(letture, km, precedente, spie = spie, estesa = estesa)
                 storico.salva(r)
                 ultimoRapporto = r
                 runOnUiThread {
                     attesa.dismiss()
-                    if (tabCorrente == 0) mostraTab(0)
+                    if (tabCorrente == T_CONTROLLO) mostraTab(T_CONTROLLO)
                     scroll.post { scroll.smoothScrollTo(0, dp(260)) }
                 }
             } catch (e: Exception) {
@@ -205,6 +241,24 @@ class MainActivity : Activity() {
         }
         g.addView(testo(riepilogo, 13f, false, Color.WHITE).margine(6))
         aggiungi(g, 16)
+
+        // Centraline lette
+        r.centraline?.let { lista ->
+            val c = card()
+            c.addView(testo("CENTRALINE LETTE", 12f, true, GRIGIO))
+            c.addView(rigaDato("Motore", "letta", "Codici: " + (r.codici.filter { it.startsWith("P") }.joinToString(", ").ifEmpty { "nessuno" }), Gravita.VERDE.colore))
+            if (lista.isEmpty()) c.addView(testo("Nessun'altra centralina ha risposto alla scansione estesa.", 14f, false, GRIGIO).margine(6))
+            for (ct in lista) {
+                val col = if (ct.codici.isEmpty()) Gravita.VERDE.colore else Gravita.ARANCIONE.colore
+                c.addView(rigaDato(ct.nome, ct.indirizzo,
+                    if (ct.codici.isEmpty()) (if (ct.nota.startsWith("Risponde")) ct.nota else "Nessun errore") else "Errori: " + ct.codici.joinToString(", ") { it.codice }, col))
+            }
+            r.notaScansione?.let { c.addView(testo(it, 13f, false, 0xFF9A5B00.toInt()).margine(6)) }
+            aggiungi(c)
+        }
+        if (r.spie.isNotEmpty()) {
+            aggiungi(testo("Spie che hai indicato: ${r.spie.joinToString(", ")}", 13f, false, GRIGIO))
+        }
 
         // Avvisi anti-fregatura
         for (a in r.avvisi) {
@@ -236,6 +290,11 @@ class MainActivity : Activity() {
         aggiungi(bottone("Condividi il rapporto (WhatsApp, email…)", BLU) {
             condividi(Analizzatore.testo(r))
         }, 16)
+        r.logTecnico?.let { log ->
+            aggiungi(bottone("Invia rapporto tecnico (per migliorare l'app)", 0xFF6B7280.toInt()) {
+                condividi("RAPPORTO TECNICO AUTOCHECK\nProtocollo: ${r.protocollo}\nSpie: ${r.spie.joinToString(", ")}\n\n$log")
+            })
+        }
         if (obd.connesso && (r.codici.isNotEmpty() || r.spiaAccesa)) {
             aggiungi(bottone("Cancella errori e spegni la spia", 0xFF9CA3AF.toInt()) { confermaCancellazione() })
         }
@@ -292,7 +351,7 @@ class MainActivity : Activity() {
                         if (ok) {
                             ultimoRapporto = null
                             info("Errori cancellati", "Fatto. Guida qualche giorno e rifai il controllo: se un errore torna, il problema non è risolto.")
-                            mostraTab(0)
+                            mostraTab(T_CONTROLLO)
                         } else errore("Cancellazione non riuscita", "Assicurati che il quadro sia acceso e il motore spento, poi riprova.")
                     }
                 }.start()
@@ -301,13 +360,77 @@ class MainActivity : Activity() {
             .show()
     }
 
+    // ═════════════════════ TAB SPIE ═════════════════════
+
+    private fun tabSpie() {
+        aggiungi(testo("Tocca la spia che vedi accesa sul cruscotto: l'app ti spiega cosa significa, se puoi guidare, le cause, cosa controllare e quanto costa. Funziona anche senza adattatore.",
+            14f, false, GRIGIO))
+        for (sp in Spie.TUTTE) {
+            val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val c = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = sfondo(Color.WHITE, sp.scheda.gravita.colore, 2)
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+            }
+            c.addView(testo("${sp.scheda.gravita.emoji}  ${sp.nome}", 16f, true))
+            c.addView(testo(sp.aspetto, 13f, false, GRIGIO).margine(4))
+            box.addView(c)
+            var aperta = false
+            c.setOnClickListener {
+                aperta = !aperta
+                if (aperta) box.addView(vistaScheda(sp.scheda).also {
+                    it.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) }
+                }) else if (box.childCount > 1) box.removeViewAt(1)
+            }
+            aggiungi(box)
+        }
+        aggiungi(testo("Spie rosse = fermati e controlla subito. Spie gialle/arancioni = anomalia da far controllare. Spie verdi o blu = solo informative (luci, cruise control).",
+            13f, false, GRIGIO), 16)
+    }
+
+    private fun selettoreSpie(): View {
+        val contenitore = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val opzioni = listOf("motore", "motore_lamp", "esp", "abs", "freni", "airbag", "batteria", "olio", "temperatura", "servosterzo", "candelette")
+        var riga: LinearLayout? = null
+        opzioni.forEachIndexed { i, id ->
+            if (i % 2 == 0) {
+                riga = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                contenitore.addView(riga)
+            }
+            val sp = Spie.perId(id) ?: return@forEachIndexed
+            val chip = TextView(this).apply {
+                text = sp.nome
+                textSize = 13f
+                gravity = Gravity.CENTER
+                setPadding(dp(8), dp(10), dp(8), dp(10))
+            }
+            fun aggiorna() {
+                val on = id in spieAccese
+                chip.background = sfondo(if (on) 0xFFFFF1E6.toInt() else Color.WHITE, if (on) ARANCIO else 0xFFE5E7EB.toInt(), if (on) 2 else 1)
+                chip.setTextColor(if (on) TESTO else GRIGIO)
+                chip.setTypeface(null, if (on) Typeface.BOLD else Typeface.NORMAL)
+            }
+            aggiorna()
+            chip.setOnClickListener {
+                if (id in spieAccese) spieAccese.remove(id) else spieAccese.add(id)
+                aggiorna()
+            }
+            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(if (i % 2 == 0) 0 else dp(4), dp(4), if (i % 2 == 0) dp(4) else 0, 0)
+            }
+            riga?.addView(chip, lp)
+        }
+        if (opzioni.size % 2 == 1) riga?.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        return contenitore
+    }
+
     // ═════════════════════ TAB LIVE ═════════════════════
 
     private fun tabLive() {
         if (!obd.connesso) {
             val c = card()
             c.addView(testo("Collega prima l'adattatore per vedere i dati del motore in tempo reale.", 15f))
-            c.addView(bottone("Vai al collegamento", BLU) { mostraTab(3) }.margine(12))
+            c.addView(bottone("Vai al collegamento", BLU) { mostraTab(T_ADATTATORE) }.margine(12))
             aggiungi(c)
             return
         }
@@ -410,7 +533,7 @@ class MainActivity : Activity() {
             AlertDialog.Builder(this)
                 .setTitle("Cancellare lo storico?")
                 .setMessage("Tutti i controlli salvati verranno eliminati dal telefono. L'operazione non si può annullare.")
-                .setPositiveButton("Elimina") { _, _ -> storico.cancellaTutto(); mostraTab(2) }
+                .setPositiveButton("Elimina") { _, _ -> storico.cancellaTutto(); mostraTab(T_STORICO) }
                 .setNegativeButton("Annulla", null)
                 .show()
         }, 20)
@@ -422,7 +545,7 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setView(sv)
             .setPositiveButton("Condividi") { _, _ -> condividi(c.testo) }
-            .setNeutralButton("Elimina") { _, _ -> storico.elimina(c.quando); mostraTab(2) }
+            .setNeutralButton("Elimina") { _, _ -> storico.elimina(c.quando); mostraTab(T_STORICO) }
             .setNegativeButton("Chiudi", null)
             .show()
     }
@@ -446,9 +569,9 @@ class MainActivity : Activity() {
             val c = card()
             c.addView(testo("✅ Collegato a ${obd.nomeDispositivo}", 16f, true, 0xFF2E7D32.toInt()))
             c.addView(testo("Protocollo dell'auto: ${obd.protocollo}", 14f, false, GRIGIO).margine(4))
-            c.addView(bottone("Vai al controllo", ARANCIO) { mostraTab(0) }.margine(12))
+            c.addView(bottone("Vai al controllo", ARANCIO) { mostraTab(T_CONTROLLO) }.margine(12))
             c.addView(bottone("Scollega", 0xFF9CA3AF.toInt()) {
-                Thread { obd.chiudi(); runOnUiThread { aggiornaStato(); mostraTab(3) } }.start()
+                Thread { obd.chiudi(); runOnUiThread { aggiornaStato(); mostraTab(T_ADATTATORE) } }.start()
             }.margine(8))
             aggiungi(c)
             return
@@ -514,7 +637,7 @@ class MainActivity : Activity() {
                     attesa.dismiss()
                     aggiornaStato()
                     Toast.makeText(this, "Collegato! Protocollo: ${obd.protocollo}", Toast.LENGTH_LONG).show()
-                    mostraTab(0)
+                    mostraTab(T_CONTROLLO)
                 }
             } catch (e: Exception) {
                 runOnUiThread {
@@ -543,7 +666,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (::contenuto.isInitialized && tabCorrente == 3) mostraTab(3)
+        if (::contenuto.isInitialized && tabCorrente == T_ADATTATORE) mostraTab(T_ADATTATORE)
     }
 
     // ═════════════════════ UTILITÀ GRAFICHE ═════════════════════

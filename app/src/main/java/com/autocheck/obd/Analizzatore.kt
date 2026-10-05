@@ -13,7 +13,10 @@ object Analizzatore {
 
     private val dataFmt = SimpleDateFormat("dd/MM/yyyy", Locale.ITALY)
 
-    fun analizza(l: Letture, km: Int?, precedente: Controllo?, adesso: Long = System.currentTimeMillis()): Rapporto {
+    fun analizza(
+        l: Letture, km: Int?, precedente: Controllo?, adesso: Long = System.currentTimeMillis(),
+        spie: Set<String> = emptySet(), estesa: EsitoScansione? = null
+    ): Rapporto {
         val v = l.valori
         val schede = ArrayList<Scheda>()
         val avvisi = ArrayList<String>()
@@ -36,6 +39,34 @@ object Analizzatore {
                     "verifica, guidando, che il guasto è davvero risolto."))
         }
 
+        // ── Altre centraline (scansione estesa) ──
+        val centraline = estesa?.centraline.orEmpty()
+        for (ct in centraline) for (cc in ct.codici) {
+            val sc = DatabaseGuasti.trovaPerCentralina(cc.codice, ct.tipo, cc.dettaglio)
+            schede.add(if (cc.inOsservazione) sc.copy(nota = (sc.nota ?: "") +
+                "\nIN OSSERVAZIONE: rilevato ma non ancora confermato. Ricontrolla tra qualche giorno.") else sc)
+        }
+        val codiciCentraline = centraline.flatMap { ct -> ct.codici.map { it.codice } }
+
+        // ── Spie del cruscotto indicate dalla persona ──
+        val absEsp = centraline.filter { it.tipo == TipoCentralina.ABS_ESP }
+        val absEspConCodici = absEsp.any { it.codici.isNotEmpty() }
+        for (id in spie) {
+            val sp = Spie.perId(id) ?: continue
+            if (id == "motore") continue // spiegato dai codici del motore
+            if ((id == "esp" || id == "abs") && absEspConCodici) continue // i codici ABS/ESP sono più precisi
+            schede.add(sp.scheda.copy(nota = "Spia indicata da te: ${sp.nome}"))
+        }
+        schede.addAll(Spie.combinazioni(spie, l.memorizzati))
+        if (("esp" in spie || "abs" in spie) && estesa != null) {
+            val nomeSpia = if ("esp" in spie) "ESP" else "ABS"
+            if (absEsp.isEmpty()) avvisi.add("La spia $nomeSpia è accesa, ma la centralina ABS/ESP della tua auto non ha risposto alla scansione estesa: su molte auto usa comandi che un adattatore generico non conosce. " +
+                "Leggi la scheda della spia qui sotto per cause e controlli, e se vuoi invia il \"rapporto tecnico\" per migliorare l'app.")
+            else if (!absEspConCodici) avvisi.add("La centralina ABS/ESP risponde e non ha errori memorizzati. La spia $nomeSpia può dipendere da un altro sistema (es. un errore del motore o la tensione della batteria) oppure da un'anomalia momentanea.")
+        } else if (("esp" in spie || "abs" in spie) && estesa == null) {
+            avvisi.add("Per cercare la causa della spia, attiva la \"scansione estesa\" prima di avviare il controllo: prova a leggere anche la centralina ABS/ESP.")
+        }
+
         // ── Dati motore ──
         schede.addAll(regoleDatiMotore(v))
         val datiMotore = ArrayList<DatoMotore>()
@@ -49,9 +80,10 @@ object Analizzatore {
         // ── Controlli anti-fregatura ──
         val kmCanc = v["km_cancellazione"]?.toInt()
         val kmSpia = v["km_spia"]?.toInt() ?: 0
-        val tuttiCodici = (l.memorizzati + l.pendenti + l.permanenti).distinct()
+        val codiciMotore = (l.memorizzati + l.pendenti + l.permanenti).distinct()
+        val tuttiCodici = (codiciMotore + codiciCentraline).distinct()
 
-        if (spiaAccesa && tuttiCodici.isEmpty()) {
+        if (spiaAccesa && codiciMotore.isEmpty()) {
             avvisi.add("La spia motore risulta accesa ma non sono stati letti codici. Potrebbe essere un guasto in un'altra centralina (es. cambio). Fai una diagnosi completa in officina.")
         }
         if (kmSpia > 0) {
@@ -106,7 +138,9 @@ object Analizzatore {
             quando = adesso, km = km, verdetto = verdetto, gravita = peggiore,
             schede = schede.sortedByDescending { it.gravita.livello },
             avvisi = avvisi, datiMotore = datiMotore, codici = tuttiCodici,
-            spiaAccesa = spiaAccesa, kmDaCancellazione = kmCanc, protocollo = l.protocollo
+            spiaAccesa = spiaAccesa, kmDaCancellazione = kmCanc, protocollo = l.protocollo,
+            spie = spie.mapNotNull { Spie.perId(it)?.nome }, centraline = estesa?.centraline,
+            notaScansione = estesa?.nota, logTecnico = estesa?.log
         )
     }
 
@@ -228,6 +262,12 @@ object Analizzatore {
         r.km?.let { sb.append("Chilometri: $it km\n") }
         sb.append("Spia motore: ${if (r.spiaAccesa) "ACCESA" else "spenta"}\n")
         r.kmDaCancellazione?.let { sb.append("Km dall'ultima cancellazione errori: $it km\n") }
+        if (r.spie.isNotEmpty()) sb.append("Spie accese indicate: ${r.spie.joinToString(", ")}\n")
+        r.centraline?.let { c ->
+            sb.append("Altre centraline lette: ")
+            sb.append(if (c.isEmpty()) "nessuna ha risposto" else c.joinToString("; ") { "${it.nome} (${it.indirizzo}): " + if (it.codici.isEmpty()) "nessun errore" else it.codici.joinToString(", ") { x -> x.codice } })
+            sb.append("\n")
+        }
         sb.append("\nGIUDIZIO: ${r.gravita?.emoji ?: "✅"} ${r.verdetto}\n")
 
         if (r.avvisi.isNotEmpty()) {

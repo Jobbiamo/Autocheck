@@ -8,6 +8,9 @@ App Android che legge la centralina dell'auto tramite un adattatore **ELM327 Blu
   se serve il meccanico, costo indicativo di mercato e cosa succede se lo ignori.
 - Controlla i dati del motore (temperatura, batteria/alternatore, miscela aria-benzina) e segnala anomalie anche senza codici.
 - **Anti-fregatura**: avvisa se gli errori sono stati cancellati da poco, se un errore "riparato" è tornato, se i test di autodiagnosi non sono completati.
+- **Scansione estesa (sperimentale)**: prova a leggere anche le centraline ABS/ESP, airbag, cambio e quadro (UDS e KWP2000, su CAN e linea K), in sola lettura.
+- **Guida alle spie del cruscotto**: per ogni spia gravità, cause, controlli e costi; le spie indicate entrano nella diagnosi (es. ESP acceso insieme a un errore motore).
+- **Rapporto tecnico** condivisibile con le risposte grezze dell'adattatore, per adattare l'app a un'auto specifica.
 - Dati del motore in tempo reale.
 - Storico dei controlli salvato **solo nel telefono** (nessun server, nessun account).
 - Rapporto condivisibile via WhatsApp/email, da mostrare al meccanico.
@@ -25,4 +28,4 @@ e pubblica `AutoCheck.apk` nella release **latest**. Il link resta sempre lo ste
 ## Note
 - I costi sono stime indicative per un'officina indipendente in Italia (manodopera 40–60 €/h).
 - La diagnosi è probabile, non certa.
-- I codici OBD standard riguardano motore ed emissioni; ABS, airbag e carrozzeria usano protocolli del costruttore e di solito non sono leggibili con un ELM327 generico.
+- I codici OBD standard riguardano motore ed emissioni; ABS, airbag e carrozzeria usano protocolli del costruttore: la scansione estesa li prova, ma non è garantito che rispondano a un ELM327 generico.
