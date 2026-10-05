@@ -53,6 +53,13 @@ class MainActivity : Activity() {
     // Selezioni del controllo
     private val spieAccese = LinkedHashSet<String>()
     private var scansioneEstesa = true
+    private var scansioneProfonda = false
+
+    /** Marca dell'auto: scelta dall'utente oppure riconosciuta dal numero di telaio. */
+    private fun marcaAttuale(): String? {
+        val p = prefs.getString("profilo_auto", "auto") ?: "auto"
+        return if (p == "auto") Marche.daVin(obd.vin) else p
+    }
 
     // Colori
     private val BLU = 0xFF1E3A5F.toInt()
@@ -64,6 +71,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         storico = Storico(this)
+        preparaCodiciCostruttore()
         costruisciInterfaccia()
         mostraTab(if (obd.connesso) T_CONTROLLO else T_ADATTATORE)
     }
@@ -120,9 +128,26 @@ class MainActivity : Activity() {
         aggiornaStato()
     }
 
+    private fun preparaCodiciCostruttore() {
+        val app = applicationContext
+        var indice: HashMap<String, String>? = null
+        CodiciCostruttore.cerca = { marca, codice ->
+            val idx = indice ?: HashMap<String, String>().also { m ->
+                try {
+                    app.assets.open("dtc_costruttori.tsv").bufferedReader().useLines { righe ->
+                        righe.forEach { r -> val p = r.split('\t'); if (p.size >= 3) m[p[0] + "\t" + p[1]] = p[2] }
+                    }
+                } catch (e: Exception) { }
+                indice = m
+            }
+            CodiciCostruttore.alias(marca).firstNotNullOfOrNull { idx[it + "\t" + codice] }
+        }
+    }
+
     private fun aggiornaStato() {
         statoTv.text = if (obd.connesso)
-            "● Collegato a ${obd.nomeDispositivo}" + (if (obd.protocollo.isNotEmpty()) " · ${obd.protocollo}" else "")
+            "● Collegato a ${obd.nomeDispositivo}" + (if (obd.protocollo.isNotEmpty()) " · ${obd.protocollo}" else "") +
+                (marcaAttuale()?.let { " · $it" } ?: "")
         else "○ Adattatore non collegato"
     }
 
@@ -180,6 +205,17 @@ class MainActivity : Activity() {
         estesaTv.setOnClickListener { scansioneEstesa = !scansioneEstesa; aggiornaEstesa() }
         c.addView(estesaTv.margine(10))
 
+        val profondaTv = testo("", 14f)
+        fun aggiornaProfonda() {
+            profondaTv.text = (if (scansioneProfonda) "☑" else "☐") + "  Scansione profonda: prova centinaia di indirizzi per trovare anche le centraline non documentate (2–4 minuti, solo a MOTORE SPENTO e quadro acceso)"
+            profondaTv.alpha = if (scansioneEstesa) 1f else 0.4f
+        }
+        aggiornaProfonda()
+        profondaTv.setPadding(0, dp(8), 0, dp(8))
+        profondaTv.setOnClickListener { if (scansioneEstesa) { scansioneProfonda = !scansioneProfonda; aggiornaProfonda() } }
+        estesaTv.setOnClickListener { scansioneEstesa = !scansioneEstesa; if (!scansioneEstesa) scansioneProfonda = false; aggiornaEstesa(); aggiornaProfonda() }
+        c.addView(profondaTv.margine(4))
+
         c.addView(bottone("AVVIA CONTROLLO", ARANCIO) {
             val km = kmEdit.text.toString().trim().toIntOrNull()
             km?.let { prefs.edit().putInt("ultimi_km", it).apply() }
@@ -194,19 +230,27 @@ class MainActivity : Activity() {
         val attesa = dialogoAttesa("Sto leggendo la centralina motore…\nCi vogliono circa 20–40 secondi.")
         val spie = spieAccese.toSet()
         val estesaRichiesta = scansioneEstesa
+        val profondaRichiesta = scansioneEstesa && scansioneProfonda
+        val marca = marcaAttuale()
         Thread {
             try {
                 val letture = obd.leggiTutto()
+                // per sicurezza la scansione profonda si fa solo a motore spento
+                val motoreAcceso = (letture.valori["giri"] ?: 0.0) > 0
+                val profonda = profondaRichiesta && !motoreAcceso
+                val notaProfonda = if (profondaRichiesta && motoreAcceso)
+                    "Scansione profonda saltata: il motore era acceso. Spegni il motore, lascia il quadro acceso e rifai il controllo." else null
                 val estesa = if (estesaRichiesta) {
                     runOnUiThread { attesa.setMessage("Centralina motore letta.\nOra provo le altre centraline (ABS/ESP, airbag…)…") }
-                    try {
-                        obd.scansioneEstesa { msg -> runOnUiThread { attesa.setMessage("Scansione estesa\n$msg") } }
+                    val e = try {
+                        obd.scansioneEstesa(marca, profonda) { msg -> runOnUiThread { attesa.setMessage("Scansione estesa\n$msg") } }
                     } catch (e: Exception) {
                         EsitoScansione(emptyList(), "ERRORE: ${e.message}", "Scansione estesa non riuscita: ${e.message}")
                     }
+                    if (notaProfonda != null) e.copy(nota = listOfNotNull(notaProfonda, e.nota).joinToString("\n")) else e
                 } else null
                 val precedente = storico.lista().firstOrNull()
-                val r = Analizzatore.analizza(letture, km, precedente, spie = spie, estesa = estesa)
+                val r = Analizzatore.analizza(letture, km, precedente, spie = spie, estesa = estesa, marca = marca)
                 storico.salva(r)
                 ultimoRapporto = r
                 runOnUiThread {
@@ -255,6 +299,9 @@ class MainActivity : Activity() {
             }
             r.notaScansione?.let { c.addView(testo(it, 13f, false, 0xFF9A5B00.toInt()).margine(6)) }
             aggiungi(c)
+        }
+        if (r.marca != null || r.vin != null) {
+            aggiungi(testo("Auto: ${r.marca ?: "marca non riconosciuta"}" + (r.vin?.let { " · telaio $it" } ?: ""), 13f, false, GRIGIO))
         }
         if (r.spie.isNotEmpty()) {
             aggiungi(testo("Spie che hai indicato: ${r.spie.joinToString(", ")}", 13f, false, GRIGIO))
@@ -564,16 +611,21 @@ class MainActivity : Activity() {
             startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
         }.margine(12))
         aggiungi(istr)
+        if (!obd.connesso) aggiungi(cardProfilo())
 
         if (obd.connesso) {
             val c = card()
             c.addView(testo("✅ Collegato a ${obd.nomeDispositivo}", 16f, true, 0xFF2E7D32.toInt()))
             c.addView(testo("Protocollo dell'auto: ${obd.protocollo}", 14f, false, GRIGIO).margine(4))
-            c.addView(bottone("Vai al controllo", ARANCIO) { mostraTab(T_CONTROLLO) }.margine(12))
-            c.addView(bottone("Scollega", 0xFF9CA3AF.toInt()) {
+            c.addView(testo("Numero di telaio: ${obd.vin ?: "non fornito dall'auto"}", 14f, false, GRIGIO).margine(2))
+            aggiungi(c)
+            aggiungi(cardProfilo())
+            val c2 = card()
+            c2.addView(bottone("Vai al controllo", ARANCIO) { mostraTab(T_CONTROLLO) })
+            c2.addView(bottone("Scollega", 0xFF9CA3AF.toInt()) {
                 Thread { obd.chiudi(); runOnUiThread { aggiornaStato(); mostraTab(T_ADATTATORE) } }.start()
             }.margine(8))
-            aggiungi(c)
+            aggiungi(c2)
             return
         }
 
@@ -620,6 +672,28 @@ class MainActivity : Activity() {
             c.addView(testo(if (obdLike) "Sembra un adattatore OBD · tocca per collegare" else d.address, 13f, false, GRIGIO))
             aggiungi(c)
         }
+    }
+
+    private fun cardProfilo(): View {
+        val c = card()
+        val p = prefs.getString("profilo_auto", "auto") ?: "auto"
+        val riconosciuta = Marche.daVin(obd.vin)
+        c.addView(testo("La tua auto", 16f, true))
+        c.addView(testo(if (p == "auto") "Automatica: ${riconosciuta ?: "marca non riconosciuta"}" + (if (obd.vin == null && obd.connesso) " (l'auto non fornisce il numero di telaio)" else "")
+            else "Scelta da te: $p", 14f).margine(4))
+        c.addView(testo("La marca serve a provare per primi gli indirizzi giusti delle centraline e a spiegare i codici del costruttore. Per una Opel Agila del 2008–2014 scegli \"Opel Agila B\".",
+            13f, false, GRIGIO).margine(4))
+        c.addView(bottone("Cambia", BLU) {
+            val voci = listOf("Automatica (dal numero di telaio)", "Opel Agila B") + Marche.ELENCO
+            AlertDialog.Builder(this)
+                .setTitle("Scegli la tua auto")
+                .setItems(voci.toTypedArray()) { _, i ->
+                    prefs.edit().putString("profilo_auto", if (i == 0) "auto" else voci[i]).apply()
+                    aggiornaStato(); mostraTab(T_ADATTATORE)
+                }
+                .show()
+        }.margine(10))
+        return c
     }
 
     private fun pareObd(d: BluetoothDevice): Boolean {

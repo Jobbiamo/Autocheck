@@ -23,6 +23,9 @@ class ObdConnection {
         private set
     var nomeDispositivo: String = ""
         private set
+    /** Numero di telaio letto dalla centralina (se disponibile). */
+    var vin: String? = null
+        private set
     /** Numero di protocollo ELM327 (3 = ISO 9141, 4/5 = KWP, 6–9 = CAN). */
     var numeroProtocollo: Int = 0
         private set
@@ -86,6 +89,7 @@ class ObdConnection {
         val dpn = comando("ATDPN")
         protocollo = ObdParser.nomeProtocollo(dpn)
         numeroProtocollo = dpn.trim().uppercase().removePrefix("A").take(1).toIntOrNull(16) ?: 0
+        vin = try { ObdParser.vin(comando("0902", 6000)) } catch (e: Exception) { null }
     }
 
     /** Invia un comando e restituisce la risposta senza il prompt '>'. */
@@ -143,12 +147,34 @@ class ObdConnection {
         val pendenti = ObdParser.estraiDtc(comando("07", 8000), "47")
         val permanenti = ObdParser.estraiDtc(comando("0A", 8000), "4A")
         val valori = leggiValori(Pids.CONTROLLO)
-        return Letture(memorizzati, pendenti, permanenti, stato, valori, protocollo)
+        return Letture(memorizzati, pendenti, permanenti, stato, valori, protocollo, vin)
     }
 
     /** Prova a leggere le altre centraline (ABS/ESP, airbag...). Solo lettura. */
-    fun scansioneEstesa(progresso: (String) -> Unit): EsitoScansione =
-        ScansioneEstesa({ c, t -> comando(c, t) }, numeroProtocollo, protocollo, progresso).esegui()
+    fun scansioneEstesa(marca: String?, profonda: Boolean, progresso: (String) -> Unit): EsitoScansione =
+        ScansioneEstesa({ c, t -> if (c == "MONITOR") monitora(t) else comando(c, t) },
+            numeroProtocollo, protocollo, marca, profonda, progresso).esegui()
+
+    /** Ascolta passivamente il bus (ATMA) per [ms] millisecondi, poi interrompe. Solo ascolto. */
+    @Synchronized
+    fun monitora(ms: Long): String {
+        val inp = input ?: throw IOException("Adattatore non collegato")
+        val out = output ?: throw IOException("Adattatore non collegato")
+        while (inp.available() > 0) inp.read()
+        out.write("ATMA\r".toByteArray(Charsets.US_ASCII)); out.flush()
+        val sb = StringBuilder()
+        val fine = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < fine && sb.length < 20000) {
+            if (inp.available() > 0) sb.append(inp.read().toChar()) else Thread.sleep(5)
+        }
+        out.write("\r".toByteArray(Charsets.US_ASCII)); out.flush() // un carattere qualsiasi ferma il monitor
+        val stop = System.currentTimeMillis() + 2000
+        while (System.currentTimeMillis() < stop) {
+            if (inp.available() > 0) { val c = inp.read(); if (c.toChar() == '>') break; if (sb.length < 20000) sb.append(c.toChar()) }
+            else Thread.sleep(5)
+        }
+        return sb.toString().replace("ATMA", "")
+    }
 
     /** Cancella i codici errore e spegne la spia motore. */
     fun cancellaErrori(): Boolean {
@@ -165,6 +191,7 @@ class ObdConnection {
         socket = null
         protocollo = ""
         numeroProtocollo = 0
+        vin = null
     }
 
     companion object {

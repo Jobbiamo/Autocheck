@@ -35,19 +35,24 @@ class ScansioneEstesa(
     private val invia: (String, Long) -> String,
     private val proto: Int,
     private val nomeProtocollo: String,
+    private val marca: String? = null,
+    private val profonda: Boolean = false,
     private val progresso: (String) -> Unit
 ) {
 
     private val log = StringBuilder()
+    /** ID CAN usati dall'auto per il suo funzionamento: non ci si scrive mai sopra. */
+    private val traffico = HashSet<String>()
 
     private fun cmd(c: String, timeout: Long = 3000): String {
         val r = try { invia(c, timeout) } catch (e: Exception) { "ECCEZIONE: ${e.message}" }
-        if (log.length < 60000) log.append("> ").append(c).append('\n').append(r.trim()).append("\n\n")
+        if (log.length < 120000) log.append("> ").append(c).append('\n').append(r.trim().take(3000)).append("\n\n")
         return r
     }
 
     fun esegui(): EsitoScansione {
         log.append("Protocollo motore: ").append(proto).append(" (").append(nomeProtocollo).append(")\n")
+        log.append("Marca: ").append(marca ?: "non riconosciuta").append(" · Scansione profonda: ").append(profonda).append("\n")
         log.append("Versione adattatore: ").append(cmd("ATI").trim()).append("\n\n")
 
         val trovate = ArrayList<Centralina>()
@@ -64,88 +69,144 @@ class ScansioneEstesa(
         } finally {
             ripristina(proto)
         }
-        // Una centralina può rispondere sia su CAN sia su linea K: tieni la prima
         val uniche = trovate.distinctBy { it.tipo.name + it.codici.joinToString { c -> c.codice } + it.indirizzo }
         return EsitoScansione(uniche.filter { it.tipo != TipoCentralina.MOTORE || it.codici.isNotEmpty() }, log.toString(), nota)
     }
 
     // ───────────────────────────── CAN ─────────────────────────────
 
+    private fun ascoltaTraffico() {
+        progresso("Ascolto il traffico dell'auto (2 secondi)…")
+        val r = cmd("MONITOR", 2500)
+        for (riga in r.split('\n', '\r')) {
+            val t = riga.trim().uppercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
+            if (t.size < 2 || t.any { !it.all { c -> c in '0'..'9' || c in 'A'..'F' } }) continue
+            if (t[0].length == 3) traffico.add(t[0])
+            else if (t.size >= 5 && t.take(4).all { it.length == 2 }) traffico.add(t.take(4).joinToString(""))
+        }
+        if (traffico.isNotEmpty()) log.append("ID di traffico esclusi: ").append(traffico.sorted().joinToString(" ")).append("\n\n")
+    }
+
     private fun scansioneCan(bit29: Boolean): List<Centralina> {
         cmd("ATH1"); cmd("ATS1"); cmd("ATCAF1"); cmd("ATAT0"); cmd("ATST64")
+        ascoltaTraffico()
 
-        // 1) scoperta: chi risponde a una richiesta "funzionale" (a tutti)?
+        // 1) scoperta funzionale
         progresso("Cerco le centraline presenti…")
         val rispondenti = LinkedHashSet<String>()
         if (bit29) {
             cmd("ATSH18DB33F1"); cmd("ATCF18DAF100"); cmd("ATCM1FFFFF00")
         } else {
-            cmd("ATSH7DF"); cmd("ATCF700"); cmd("ATCM700")
+            cmd("ATSH7DF"); cmd("ATCF600"); cmd("ATCM600")
         }
         for (richiesta in listOf("3E00", "1902FF")) {
-            for (m in IsoTp.riassembla(cmd(richiesta, 4000))) rispondenti.add(m.id)
-        }
-        cmd("ATCRA")
-
-        // 2) interrogazione fisica: indirizzi scoperti + indirizzi tipici
-        val coppie = LinkedHashMap<String, String>() // richiesta -> risposta
-        if (bit29) {
-            for (r in rispondenti) if (r.length == 8 && r.startsWith("18DAF1")) {
-                val t = r.substring(6); coppie["18DA${t}F1"] = r
+            for (m in IsoTp.riassembla(cmd(richiesta, 4000))) {
+                val sid = m.data.firstOrNull() ?: continue
+                if (m.id !in traffico && (sid == 0x7E || sid == 0x59 || sid == 0x7F)) rispondenti.add(m.id)
             }
-            for (t in listOf("10", "11", "18", "28", "29", "2A", "30", "40", "58", "60", "70")) coppie["18DA${t}F1"] = "18DAF1$t"
+        }
+
+        // 2) coppie richiesta -> risposta da provare
+        val coppie = LinkedHashMap<String, String>()
+        val suggerimenti = HashMap<String, TipoCentralina>()
+        for (c in Marche.indirizzi(marca)) {
+            if ((c.richiesta.length == 8) == bit29) {
+                coppie[c.richiesta] = c.risposta
+                c.tipo?.let { suggerimenti[c.richiesta] = it }
+            }
+        }
+        if (bit29) {
+            for (r in rispondenti) if (r.length == 8 && r.startsWith("18DAF1")) coppie.putIfAbsent("18DA${r.substring(6)}F1", r)
+            for (t in listOf("10", "11", "18", "28", "29", "2A", "30", "40", "58", "60", "70")) coppie.putIfAbsent("18DA${t}F1", "18DAF1$t")
         } else {
             for (r in rispondenti) if (r.length == 3) {
                 val v = r.toInt(16)
                 val req = if (v in 0x600..0x6FF) v - 0x400 else v - 8
-                if (req > 0) coppie[hex3(req)] = r
+                if (req > 0) coppie.putIfAbsent(hex3(req), r)
             }
             val tipici = (0x7E0..0x7E7) + listOf(0x7B0, 0x7B1, 0x7B2, 0x7B6, 0x7C0, 0x7C4, 0x7D0, 0x7D1, 0x7D2, 0x760, 0x740, 0x750, 0x720, 0x730)
-            for (q in tipici) coppie[hex3(q)] = hex3(q + 8)
-            for (q in listOf(0x241, 0x243, 0x244, 0x247)) coppie[hex3(q)] = hex3(q + 0x400) // GMLAN
+            for (q in tipici) coppie.putIfAbsent(hex3(q), hex3(q + 8))
+            for (q in listOf(0x241, 0x243, 0x244, 0x247)) coppie.putIfAbsent(hex3(q), hex3(q + 0x400)) // GMLAN
         }
 
+        // 3) scansione profonda: prova tutti gli indirizzi diagnostici e annota chi risponde
+        if (profonda) coppie.putAll(scopriConSweep(bit29, coppie.keys))
+
+        // mai scrivere su un ID che l'auto usa per il suo funzionamento
+        coppie.keys.removeAll { it in traffico }
+
         val out = ArrayList<Centralina>()
+        var n = 0
         for ((req, rsp) in coppie) {
+            n++
             if (!bit29 && req == "7E0" && rsp == "7E8") continue // il motore è già letto dal controllo standard
-            progresso("Interrogo la centralina $req…")
+            if (bit29 && req == "18DA10F1") continue
+            progresso("Interrogo la centralina $req ($n di ${coppie.size})…")
             cmd("ATSH$req"); cmd("ATCRA$rsp")
             cmd("ATFCSH$req"); cmd("ATFCSD300000"); cmd("ATFCSM1")
-            interrogaCan(req, rsp, rsp in rispondenti)?.let { out.add(it) }
+            interrogaCan(req, rsp, rsp in rispondenti, suggerimenti[req])?.let { out.add(it) }
         }
         cmd("ATCRA"); cmd("ATFCSM0")
         return out
     }
 
-    private fun interrogaCan(req: String, rsp: String, scoperta: Boolean): Centralina? {
+    /** Invia un "ci sei?" (3E 00) a ogni indirizzo diagnostico e registra chi risponde e da quale ID. */
+    private fun scopriConSweep(bit29: Boolean, gia: Set<String>): Map<String, String> {
+        val trovate = LinkedHashMap<String, String>()
+        cmd("ATST19")
+        val richieste: List<String> = if (bit29) {
+            cmd("ATCF18DAF100"); cmd("ATCM1FFFFF00")
+            (0x00..0xFF).filter { it != 0xF1 && it != 0x33 }.map { String.format("18DA%02XF1", it) }
+        } else {
+            cmd("ATCF600"); cmd("ATCM600")
+            (0x600..0x7FF).filter { it != 0x7DF && it !in 0x7E8..0x7EF }.map { hex3(it) }
+        }
+        val daProvare = richieste.filter { it !in gia && it !in traffico }
+        daProvare.forEachIndexed { i, req ->
+            if (i % 16 == 0) progresso("Scansione profonda: ${i * 100 / daProvare.size}% (indirizzo $req)…")
+            cmd("ATSH$req")
+            // valida solo risposte vere a "3E 00": 7E 00 (positiva) o 7F 3E xx (negativa), mai traffico normale
+            val ids = IsoTp.riassembla(cmd("3E00", 1500))
+                .filter { it.id !in traffico && it.data.isNotEmpty() && (it.data[0] == 0x7E || (it.data[0] == 0x7F && it.data.size >= 2 && it.data[1] == 0x3E)) }
+                .map { it.id }.distinct()
+            // un solo rispondente = indirizzo fisico; più rispondenti = indirizzo "a tutti", da ignorare
+            if (ids.size == 1 && ids[0] != req) trovate[req] = ids[0]
+        }
+        cmd("ATST64")
+        log.append("Sweep: trovate ").append(trovate.size).append(" centraline: ").append(trovate.entries.joinToString { "${it.key}->${it.value}" }).append("\n\n")
+        return trovate
+    }
+
+    private fun interrogaCan(req: String, rsp: String, scoperta: Boolean, suggerito: TipoCentralina?): Centralina? {
         var esiste = scoperta
-        // UDS: 19 02 FF = codici con stato
         var msgs = messaggiDa(cmd("1902FF", 4000), rsp)
         if (attesa(msgs)) { cmd("ATSTFF"); msgs = messaggiDa(cmd("1902FF", 6000), rsp); cmd("ATST64") }
         msgs.firstOrNull { it.data.isNotEmpty() && it.data[0] == 0x59 }?.let {
-            return Centralina(nomePer(req, it.dtc()), tipoPer(req, decodificaUds(it.data)), req, decodificaUds(it.data), "UDS")
+            val codici = decodificaUds(it.data)
+            val tipo = suggerito ?: tipoPer(req, codici)
+            return Centralina(nomeDi(tipo, req), tipo, req, codici, "UDS")
         }
         if (msgs.isNotEmpty()) esiste = true
         if (!esiste) return null
 
-        // KWP2000 su CAN
         for (richiesta in listOf("1802FF00", "1800FF00", "13")) {
             val m = messaggiDa(cmd(richiesta, 4000), rsp)
             m.firstOrNull { it.data.isNotEmpty() && (it.data[0] == 0x58 || it.data[0] == 0x53) }?.let {
                 val codici = decodificaKwp(it.data)
-                return Centralina(nomePer(req, codici), tipoPer(req, codici), req, codici, "KWP")
+                val tipo = suggerito ?: tipoPer(req, codici)
+                return Centralina(nomeDi(tipo, req), tipo, req, codici, "KWP")
             }
         }
-        return Centralina(nomePer(req, emptyList()), tipoPer(req, emptyList()), req, emptyList(),
-            "Risponde, ma non ha accettato le richieste di lettura errori")
+        val tipo = suggerito ?: tipoPer(req, emptyList())
+        return Centralina(nomeDi(tipo, req), tipo, req, emptyList(), "Risponde, ma non ha accettato le richieste di lettura errori")
     }
+
+    private fun nomeDi(t: TipoCentralina, req: String) =
+        if (t == TipoCentralina.SCONOSCIUTA) "Centralina all'indirizzo $req" else t.nome
 
     private fun messaggiDa(r: String, rsp: String) = IsoTp.riassembla(r).filter { it.id == rsp }
 
-    /** Risposta negativa 78 = "sto elaborando, aspetta". */
     private fun attesa(m: List<IsoTp.Msg>) = m.any { it.data.size >= 3 && it.data[0] == 0x7F && it.data[2] == 0x78 }
-
-    private fun IsoTp.Msg.dtc() = if (data.isNotEmpty() && data[0] == 0x59) decodificaUds(data) else emptyList()
 
     // ─────────────────────────── LINEA K ───────────────────────────
 
@@ -153,19 +214,21 @@ class ScansioneEstesa(
         val out = ArrayList<Centralina>()
         cmd("ATH0"); cmd("ATS1"); cmd("ATAT1")
         cmd("ATSP5")
-        val indirizzi = listOf("28" to TipoCentralina.ABS_ESP, "29" to TipoCentralina.ABS_ESP, "58" to TipoCentralina.AIRBAG,
+        val base = listOf("28" to TipoCentralina.ABS_ESP, "29" to TipoCentralina.ABS_ESP, "58" to TipoCentralina.AIRBAG,
             "18" to TipoCentralina.CAMBIO, "40" to TipoCentralina.CARROZZERIA, "60" to TipoCentralina.QUADRO)
+        val extra = if (!profonda) emptyList() else listOf("2A", "2B", "2C", "2D", "2E", "2F", "59", "5A", "19", "1A", "41", "61", "30", "31", "70", "57")
+            .map { it to TipoCentralina.SCONOSCIUTA }
         var guastiInit = 0
-        for ((a, tipo) in indirizzi) {
-            progresso("Provo la linea K: ${tipo.nome}…")
+        for ((a, tipo) in base + extra) {
+            progresso("Provo la linea K: indirizzo $a…")
             cmd("ATPC")
             cmd("ATSH81${a}F1")
             var r = cmd("1802FF00", 9000)
             val u = r.uppercase()
             if (u.contains("BUS INIT") || u.contains("UNABLE") || u.contains("ERROR")) {
                 guastiInit++
-                // nessuna linea K collegata: inutile insistere con tutti gli indirizzi
-                if (guastiInit >= 3 && out.isEmpty()) break
+                if (guastiInit >= 3 && out.isEmpty() && !profonda) break
+                if (guastiInit >= 6 && out.isEmpty()) break
                 continue
             }
             var dati = righeDati(r)
@@ -176,9 +239,10 @@ class ScansioneEstesa(
             val riga58 = dati.firstOrNull { it.firstOrNull() == 0x58 || it.firstOrNull() == 0x53 }
             if (riga58 != null) {
                 val codici = dati.filter { it.firstOrNull() == riga58[0] }.flatMap { decodificaKwp(it) }.distinctBy { it.codice }
-                out.add(Centralina(tipo.nome, tipo, "K-$a", codici, "KWP linea K"))
+                val t = if (tipo == TipoCentralina.SCONOSCIUTA) tipoPer("K-$a", codici) else tipo
+                out.add(Centralina(nomeDi(t, "K-$a"), t, "K-$a", codici, "KWP linea K"))
             } else if (dati.isNotEmpty()) {
-                out.add(Centralina(tipo.nome, tipo, "K-$a", emptyList(), "Risponde, ma non ha accettato le richieste di lettura errori"))
+                out.add(Centralina(nomeDi(tipo, "K-$a"), tipo, "K-$a", emptyList(), "Risponde, ma non ha accettato le richieste di lettura errori"))
             }
         }
         cmd("ATPC")

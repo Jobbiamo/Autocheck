@@ -15,7 +15,7 @@ object Analizzatore {
 
     fun analizza(
         l: Letture, km: Int?, precedente: Controllo?, adesso: Long = System.currentTimeMillis(),
-        spie: Set<String> = emptySet(), estesa: EsitoScansione? = null
+        spie: Set<String> = emptySet(), estesa: EsitoScansione? = null, marca: String? = null
     ): Rapporto {
         val v = l.valori
         val schede = ArrayList<Scheda>()
@@ -27,22 +27,23 @@ object Analizzatore {
         val testIncompleti = if (st != null && st.size >= 4) contaTestIncompleti(st) else 0
 
         // ── Codici errore ──
-        for (c in l.memorizzati) schede.add(DatabaseGuasti.trova(c))
+        for (c in l.memorizzati) schede.add(DatabaseGuasti.trova(c, marca))
+        fun conNota(s: Scheda, n: String) = s.copy(nota = listOfNotNull(n, s.nota).joinToString("\n"))
         for (c in l.pendenti) if (c !in l.memorizzati) {
-            schede.add(DatabaseGuasti.trova(c).copy(
-                nota = "IN OSSERVAZIONE: la centralina lo ha visto una volta ma non lo ha ancora confermato. " +
+            schede.add(conNota(DatabaseGuasti.trova(c, marca),
+                "IN OSSERVAZIONE: la centralina lo ha visto una volta ma non lo ha ancora confermato. " +
                     "Rifai il controllo tra qualche giorno: se diventa definitivo, va riparato."))
         }
         for (c in l.permanenti) if (c !in l.memorizzati && c !in l.pendenti) {
-            schede.add(DatabaseGuasti.trova(c).copy(
-                nota = "CODICE PERMANENTE: non si può cancellare con l'app. Sparisce da solo solo quando la centralina " +
+            schede.add(conNota(DatabaseGuasti.trova(c, marca),
+                "CODICE PERMANENTE: non si può cancellare con l'app. Sparisce da solo solo quando la centralina " +
                     "verifica, guidando, che il guasto è davvero risolto."))
         }
 
         // ── Altre centraline (scansione estesa) ──
         val centraline = estesa?.centraline.orEmpty()
         for (ct in centraline) for (cc in ct.codici) {
-            val sc = DatabaseGuasti.trovaPerCentralina(cc.codice, ct.tipo, cc.dettaglio)
+            val sc = DatabaseGuasti.trovaPerCentralina(cc.codice, ct.tipo, cc.dettaglio, marca)
             schede.add(if (cc.inOsservazione) sc.copy(nota = (sc.nota ?: "") +
                 "\nIN OSSERVAZIONE: rilevato ma non ancora confermato. Ricontrolla tra qualche giorno.") else sc)
         }
@@ -140,7 +141,7 @@ object Analizzatore {
             avvisi = avvisi, datiMotore = datiMotore, codici = tuttiCodici,
             spiaAccesa = spiaAccesa, kmDaCancellazione = kmCanc, protocollo = l.protocollo,
             spie = spie.mapNotNull { Spie.perId(it)?.nome }, centraline = estesa?.centraline,
-            notaScansione = estesa?.nota, logTecnico = estesa?.log
+            notaScansione = estesa?.nota, logTecnico = estesa?.log, vin = l.vin, marca = marca
         )
     }
 
@@ -259,6 +260,7 @@ object Analizzatore {
         val fmt = SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.ITALY)
         sb.append("RAPPORTO AUTOCHECK\n")
         sb.append("Data: ${fmt.format(Date(r.quando))}\n")
+        if (r.marca != null || r.vin != null) sb.append("Auto: ${r.marca ?: "marca non riconosciuta"}${r.vin?.let { " · telaio $it" } ?: ""}\n")
         r.km?.let { sb.append("Chilometri: $it km\n") }
         sb.append("Spia motore: ${if (r.spiaAccesa) "ACCESA" else "spenta"}\n")
         r.kmDaCancellazione?.let { sb.append("Km dall'ultima cancellazione errori: $it km\n") }

@@ -32,7 +32,8 @@ data class Letture(
     val permanenti: List<String>,
     val stato: IntArray?,
     val valori: Map<String, Double>,
-    val protocollo: String
+    val protocollo: String,
+    val vin: String? = null
 )
 
 /** Una voce di dati motore già tradotta in parole. */
@@ -59,5 +60,7 @@ data class Rapporto(
     val spie: List<String> = emptyList(),
     val centraline: List<Centralina>? = null,
     val notaScansione: String? = null,
-    val logTecnico: String? = null
+    val logTecnico: String? = null,
+    val vin: String? = null,
+    val marca: String? = null
 )

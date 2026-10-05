@@ -16,7 +16,16 @@ object DatabaseGuasti {
 
     private const val DIAGNOSI = "Una diagnosi professionale in officina costa di solito 30–60 €."
 
-    fun trova(codice: String): Scheda = cerca(codice) ?: generica(codice.uppercase())
+    fun trova(codice: String, marca: String? = null): Scheda =
+        cerca(codice) ?: CodiciMarca.trova(codice, marca) ?: conDescrizioneCostruttore(generica(codice.uppercase()), marca)
+
+    /** Aggiunge, se esiste, la descrizione originale del costruttore da un database aperto. */
+    private fun conDescrizioneCostruttore(s: Scheda, marca: String?): Scheda {
+        val c = s.codice ?: return s
+        val d = CodiciCostruttore.descrizione(marca, c) ?: return s
+        val riga = "Descrizione del costruttore (database aperto, in inglese, da verificare): \"$d\""
+        return s.copy(nota = listOfNotNull(riga, s.nota).joinToString("\n"))
+    }
 
     private fun cerca(codice: String): Scheda? {
         val c = codice.uppercase()
@@ -28,13 +37,13 @@ object DatabaseGuasti {
     }
 
     /** Scheda per un codice letto da una centralina diversa da quella motore. */
-    fun trovaPerCentralina(codice: String, tipo: TipoCentralina, dettaglio: String?): Scheda {
+    fun trovaPerCentralina(codice: String, tipo: TipoCentralina, dettaglio: String?, marca: String? = null): Scheda {
         val c = codice.uppercase()
-        val base = cerca(c) ?: when (tipo) {
+        val base = cerca(c) ?: CodiciMarca.trova(c, marca) ?: conDescrizioneCostruttore(when (tipo) {
             TipoCentralina.ABS_ESP -> genericaAbsEsp(c)
             TipoCentralina.AIRBAG -> genericaAirbag(c)
             else -> generica(c)
-        }
+        }, marca)
         val origine = "Letto dalla centralina: ${tipo.nome}" + (dettaglio?.let { " ($it)" } ?: "")
         return base.copy(nota = listOfNotNull(origine, base.nota).joinToString("\n"))
     }
@@ -45,7 +54,7 @@ object DatabaseGuasti {
         "Puoi guidare con prudenza: ABS e/o ESP possono essere disattivati. Tieni più distanza. Se è accesa la spia ROSSA dei freni, fermati.",
         listOf("Sensore di velocità di una ruota o il suo cavo (la causa più frequente)", "Anello dentato del sensore sporco o crepato",
             "Sensore angolo di sterzo da ricalibrare", "Interruttore luci stop", "Tensione batteria bassa", "Centralina o pompa ABS/ESP (più raro)"),
-        listOf("Cerca online \"$c Opel Agila\" o \"$c Suzuki Splash\" (sono la stessa auto) per la descrizione esatta",
+        listOf("Cerca online il codice \"$c\" seguito da marca e modello della tua auto per la descrizione esatta",
             "Controlla che le luci dei freni funzionino"),
         "Sì. Porta il codice al meccanico: gli fa risparmiare tempo di diagnosi.",
         "Sensore ruota: 30–90 € + 40–80 €. Calibrazione sterzo: 30–60 €. Centralina ABS/ESP: 250–500 € riparazione, 800–1.500 € nuova.",
@@ -573,11 +582,11 @@ object DatabaseGuasti {
         // ───────────── TELAIO (ABS / ESP) ─────────────
         val ruote = listOf("C0035" to "anteriore sinistra", "C0040" to "anteriore destra", "C0045" to "posteriore sinistra", "C0050" to "posteriore destra")
         for ((cod, ruota) in ruote) {
-            s(cod, "Sensore velocità ruota $ruota",
-                "Il sensore che misura quanto gira la ruota $ruota non manda un segnale corretto. Senza questo dato ABS ed ESP si disattivano.",
+            s(cod, "Sensore velocità di una ruota",
+                "Il sensore che misura quanto gira una ruota non manda un segnale corretto. Secondo la numerazione più diffusa (GM/Opel) è la ruota $ruota; su altre marche lo stesso codice può indicare un'altra ruota. Senza questo dato ABS ed ESP si disattivano.",
                 ARANCIONE, "Puoi guidare con prudenza: in frenata forte la ruota può bloccarsi e l'ESP non interviene. Tieni più distanza.",
                 listOf("Sensore sporco di fango o polvere dei freni", "Cavo del sensore rovinato o connettore ossidato (vicino alla ruota)", "Anello dentato sul mozzo crepato o arrugginito", "Sensore guasto"),
-                listOf("Guarda se il cavo che arriva alla ruota $ruota è rotto o staccato"),
+                listOf("Guarda se i cavi che arrivano alle ruote (dietro ai freni) sono rotti o staccati, a partire dalla ruota $ruota"),
                 "Sì, entro pochi giorni. È uno dei lavori più comuni ed economici su ABS/ESP.",
                 "Pulizia: 30–60 €. Sensore: 30–90 € + 40–80 € manodopera. Anello/mozzo: 60–200 € + 60–120 €.",
                 "ABS ed ESP restano spenti: frenate d'emergenza meno sicure e bocciatura alla revisione.")
@@ -629,7 +638,7 @@ object DatabaseGuasti {
                 'A', 'B', 'C', 'D', 'E', 'F' -> "componenti del motore e delle emissioni" to ARANCIONE
                 else -> "motore" to ARANCIONE
             }
-            c.startsWith("P1") || c.startsWith("P3") -> "specifico del costruttore (Opel/Suzuki), relativo al motore" to ARANCIONE
+            c.startsWith("P1") || c.startsWith("P3") -> "specifico del costruttore, relativo al motore" to ARANCIONE
             c.startsWith("C") -> "telaio: freni/ABS, sterzo o sospensioni" to ARANCIONE
             c.startsWith("B") -> "carrozzeria: airbag, luci, climatizzatore o comfort" to VERDE
             c.startsWith("U") -> "comunicazione tra le centraline" to ARANCIONE
@@ -642,7 +651,7 @@ object DatabaseGuasti {
             famiglia.second,
             if (sicurezzaFreni) "Guida con prudenza: se è accesa la spia ABS o dei freni, mantieni più distanza e fai controllare a breve."
             else "Se l'auto si comporta normalmente puoi guidare con prudenza. Se noti strappi, rumori, fumo o spie rosse, fermati.",
-            listOf("Cerca online \"$c Opel Agila\" per la descrizione esatta", "Sensore o connettore del sistema indicato"),
+            listOf("Cerca online il codice \"$c\" seguito da marca e modello della tua auto", "Sensore o connettore del sistema indicato"),
             listOf("Annota quando compare il problema (a freddo, in accelerazione, sempre...): aiuta il meccanico a trovarlo prima"),
             "Sì, per una diagnosi precisa. $DIAGNOSI",
             "Dipende dal guasto. $DIAGNOSI",

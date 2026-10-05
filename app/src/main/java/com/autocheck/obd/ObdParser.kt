@@ -91,6 +91,25 @@ object ObdParser {
         return "$lettera$cifra${quattroHex.substring(1)}"
     }
 
+    /** Numero di telaio dalla risposta a 0902 (CAN multi-frame o linea K su più righe). */
+    fun vin(risposta: String): String? {
+        val linee = righe(risposta)
+        val bytes = ArrayList<Int>()
+        if (linee.any { FRAME_CAN.matches(it) }) {
+            val dati = StringBuilder()
+            for (l in linee) FRAME_CAN.find(l)?.let { dati.append(it.groupValues[2]) }
+            val s = dati.toString()
+            val i = s.indexOf("4902")
+            if (i < 0 || i % 2 != 0) return null
+            bytes.addAll(hexToBytes(s.substring(i + 6)).toList()) // salta 49 02 e il numero di elementi
+        } else {
+            for (l in linee) if (HEX.matches(l) && l.startsWith("4902") && l.length > 6) bytes.addAll(hexToBytes(l.substring(6)).toList())
+        }
+        val testo = bytes.filter { it in 0x30..0x5A }.map { it.toChar() }.joinToString("")
+            .filter { it.isLetterOrDigit() }
+        return if (testo.length >= 17) testo.takeLast(17) else null
+    }
+
     /** Risposta di ATRV, es. "12.6V" */
     fun tensione(risposta: String): Double? {
         val m = Regex("(\\d{1,2}[.,]\\d)").find(risposta) ?: return null
